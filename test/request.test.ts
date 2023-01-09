@@ -1,3 +1,6 @@
+import fs from "fs";
+import stream from "stream";
+
 import { getUserAgent } from "universal-user-agent";
 import fetchMock from "fetch-mock";
 import { Headers, RequestInit } from "node-fetch";
@@ -12,6 +15,7 @@ import {
 import { request } from "../src";
 
 const userAgent = `octokit-request.js/0.0.0-development ${getUserAgent()}`;
+const stringToArrayBuffer = require("string-to-arraybuffer");
 
 describe("request()", () => {
   it("is a function", () => {
@@ -188,9 +192,7 @@ x//0u+zd/R/QRUzLOw4N72/Hu+UG6MNt5iDZFCtapRaKt6OvSBwy8w==
     const mock = fetchMock
       .sandbox()
       .mock("https://api.github.com/user/starred/octocat/hello-world", 204, {
-        headers: {
-          "content-length": 0,
-        },
+        body: undefined,
       });
 
     request("PUT /user/starred/{owner}/{repo}", {
@@ -499,11 +501,11 @@ x//0u+zd/R/QRUzLOw4N72/Hu+UG6MNt5iDZFCtapRaKt6OvSBwy8w==
       },
     }).catch((error) => {
       expect(error.status).toEqual(422);
-      expect(error.headers["x-foo"]).toEqual("bar");
-      expect(error.documentation_url).toEqual(
+      expect(error.response.headers["x-foo"]).toEqual("bar");
+      expect(error.response.data.documentation_url).toEqual(
         "https://developer.github.com/v3/issues/labels/#create-a-label"
       );
-      expect(error.errors).toEqual([
+      expect(error.response.data.errors).toEqual([
         { resource: "Label", code: "invalid", field: "color" },
       ]);
     });
@@ -574,6 +576,8 @@ x//0u+zd/R/QRUzLOw4N72/Hu+UG6MNt5iDZFCtapRaKt6OvSBwy8w==
   it("options.request.signal is passed as option to fetch", function () {
     return request("/", {
       request: {
+        // We pass a value that is not an `AbortSignal`, and expect `fetch` to
+        // throw an exception complaining about the value
         signal: "funk",
       },
     })
@@ -582,8 +586,9 @@ x//0u+zd/R/QRUzLOw4N72/Hu+UG6MNt5iDZFCtapRaKt6OvSBwy8w==
       })
 
       .catch((error) => {
-        expect(error.message).toMatch(/\bsignal\b/i);
-        expect(error.message).toMatch(/\bAbortSignal\b/i);
+        // We can't match on the entire string because the message differs between
+        // Node versions.
+        expect(error.message).toMatch(/AbortSignal/);
       });
   });
 
@@ -718,7 +723,7 @@ x//0u+zd/R/QRUzLOw4N72/Hu+UG6MNt5iDZFCtapRaKt6OvSBwy8w==
     });
   });
 
-  it("@octokit/rest.js/issues/1497/error-messages-on-validation-error", function () {
+  it("octokit/octokit.js#1497", function () {
     const mock = fetchMock.sandbox().mock(
       "https://request-errors-test.com/repos/gr2m/sandbox/branches/gr2m-patch-1/protection",
       {
@@ -773,5 +778,285 @@ x//0u+zd/R/QRUzLOw4N72/Hu+UG6MNt5iDZFCtapRaKt6OvSBwy8w==
           `Validation failed: "Only organization repositories can have users and team restrictions", {"resource":"Search","field":"q","code":"invalid"}`
         );
       });
+  });
+
+  it("logs deprecation warning if `deprecation` header is present", function () {
+    const mock = fetchMock.sandbox().mock(
+      "https://api.github.com/teams/123",
+      {
+        body: {
+          id: 123,
+        },
+        headers: {
+          deprecation: "Sat, 01 Feb 2020 00:00:00 GMT",
+          sunset: "Mon, 01 Feb 2021 00:00:00 GMT",
+          link: '<https://developer.github.com/changes/2020-01-21-moving-the-team-api-endpoints/>; rel="deprecation"; type="text/html", <https://api.github.com/organizations/3430433/team/4177875>; rel="alternate"',
+        },
+      },
+      {
+        headers: {
+          accept: "application/vnd.github.v3+json",
+          authorization: "token 0000000000000000000000000000000000000001",
+          "user-agent": userAgent,
+        },
+      }
+    );
+
+    const warn = jest.fn();
+
+    return request("GET /teams/{team_id}", {
+      headers: {
+        authorization: "token 0000000000000000000000000000000000000001",
+      },
+      team_id: 123,
+      request: { fetch: mock, log: { warn } },
+    }).then((response) => {
+      expect(response.data).toEqual({ id: 123 });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        '[@octokit/request] "GET https://api.github.com/teams/123" is deprecated. It is scheduled to be removed on Mon, 01 Feb 2021 00:00:00 GMT. See https://developer.github.com/changes/2020-01-21-moving-the-team-api-endpoints/'
+      );
+    });
+  });
+
+  it("deprecation header without deprecation link", function () {
+    const mock = fetchMock.sandbox().mock(
+      "https://api.github.com/teams/123",
+      {
+        body: {
+          id: 123,
+        },
+        headers: {
+          deprecation: "Sat, 01 Feb 2020 00:00:00 GMT",
+          sunset: "Mon, 01 Feb 2021 00:00:00 GMT",
+        },
+      },
+      {
+        headers: {
+          accept: "application/vnd.github.v3+json",
+          authorization: "token 0000000000000000000000000000000000000001",
+          "user-agent": userAgent,
+        },
+      }
+    );
+
+    const warn = jest.fn();
+
+    return request("GET /teams/{team_id}", {
+      headers: {
+        authorization: "token 0000000000000000000000000000000000000001",
+      },
+      team_id: 123,
+      request: { fetch: mock, log: { warn } },
+    }).then((response) => {
+      expect(response.data).toEqual({ id: 123 });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        '[@octokit/request] "GET https://api.github.com/teams/123" is deprecated. It is scheduled to be removed on Mon, 01 Feb 2021 00:00:00 GMT'
+      );
+    });
+  });
+
+  it("404 not found", () => {
+    const mock = fetchMock
+      .sandbox()
+      .get("https://api.github.com/repos/octocat/unknown", {
+        status: 404,
+        headers: {},
+        body: {
+          message: "Not Found",
+          documentation_url:
+            "https://docs.github.com/en/rest/reference/repos#get-a-repository",
+        },
+      });
+
+    return request("GET /repos/octocat/unknown", {
+      request: {
+        fetch: mock,
+      },
+    }).catch((error) => {
+      expect(error.status).toEqual(404);
+      expect(error.response.data.message).toEqual("Not Found");
+      expect(error.response.data.documentation_url).toEqual(
+        "https://docs.github.com/en/rest/reference/repos#get-a-repository"
+      );
+    });
+  });
+
+  it("Request timeout", () => {
+    const delay = (millis = 3000) => {
+      return new Promise((resolve) => {
+        setTimeout(resolve, millis);
+      });
+    };
+
+    const mock = (url: string, options: RequestInit) => {
+      expect(url).toEqual("https://api.github.com/");
+      expect(options.timeout).toEqual(100);
+      return delay().then(() => {
+        return {
+          status: 200,
+          headers: {},
+          body: {
+            message: "OK",
+          },
+        };
+      });
+    };
+
+    return request("GET /", {
+      request: {
+        timeout: 100,
+        fetch: mock,
+      },
+    })
+      .then((response) => {
+        throw new Error("should not resolve");
+      })
+      .catch((error) => {
+        expect(error.name).toEqual("HttpError");
+        expect(error.status).toEqual(500);
+      });
+  });
+
+  it("validate request with readstream data", () => {
+    const size = fs.statSync(__filename).size;
+    const mock = fetchMock
+      .sandbox()
+      .post(
+        "https://api.github.com/repos/octokit-fixture-org/release-assets/releases/v1.0.0/assets",
+        {
+          status: 200,
+        }
+      );
+
+    return request("POST /repos/{owner}/{repo}/releases/{release_id}/assets", {
+      owner: "octokit-fixture-org",
+      repo: "release-assets",
+      release_id: "v1.0.0",
+      request: {
+        fetch: mock,
+      },
+      headers: {
+        "content-type": "text/json",
+        "content-length": size,
+      },
+      data: fs.createReadStream(__filename),
+      name: "test-upload.txt",
+      label: "test",
+    }).then((response) => {
+      expect(response.status).toEqual(200);
+      expect(mock.lastOptions()?.body).toBeInstanceOf(stream.Readable);
+      expect(mock.done()).toBe(true);
+    });
+  });
+
+  it("validate request with data set to Buffer type", () => {
+    const mock = fetchMock
+      .sandbox()
+      .post(
+        "https://api.github.com/repos/octokit-fixture-org/release-assets/releases/tags/v1.0.0",
+        {
+          status: 200,
+        }
+      );
+
+    return request("POST /repos/{owner}/{repo}/releases/tags/{tag}", {
+      owner: "octokit-fixture-org",
+      repo: "release-assets",
+      tag: "v1.0.0",
+      request: {
+        fetch: mock,
+      },
+      headers: {
+        "content-type": "text/plain",
+      },
+      data: Buffer.from("Hello, world!\n"),
+      name: "test-upload.txt",
+      label: "test",
+    }).then((response) => {
+      expect(response.status).toEqual(200);
+      expect(mock.lastOptions()?.body).toEqual(Buffer.from("Hello, world!\n"));
+      expect(mock.done()).toBe(true);
+    });
+  });
+
+  it("validate request with data set to ArrayBuffer type", () => {
+    const mock = fetchMock
+      .sandbox()
+      .post(
+        "https://api.github.com/repos/octokit-fixture-org/release-assets/releases/tags/v1.0.0",
+        {
+          status: 200,
+        }
+      );
+
+    return request("POST /repos/{owner}/{repo}/releases/tags/{tag}", {
+      owner: "octokit-fixture-org",
+      repo: "release-assets",
+      tag: "v1.0.0",
+      request: {
+        fetch: mock,
+      },
+      headers: {
+        "content-type": "text/plain",
+      },
+      data: stringToArrayBuffer("Hello, world!\n"),
+      name: "test-upload.txt",
+      label: "test",
+    }).then((response) => {
+      expect(response.status).toEqual(200);
+      expect(mock.lastOptions()?.body).toEqual(
+        stringToArrayBuffer("Hello, world!\n")
+      );
+      expect(mock.done()).toBe(true);
+    });
+  });
+
+  it("bubbles up AbortError if the request is aborted", () => {
+    // AbortSignal and AbortController do not exist on
+    // Node < 15. The main parts of their API have been
+    // reproduced in the mocks below.
+    class AbortSignal {
+      abort = () => {
+        const e = new Error("");
+        e.name = "AbortError";
+        throw e;
+      };
+
+      addEventListener = () => {};
+    }
+
+    class AbortController {
+      abort = () => {
+        this.signal.abort();
+      };
+      signal = new AbortSignal();
+    }
+    const abortController = new AbortController();
+    const mock = fetchMock.sandbox().post(
+      "https://api.github.com/repos/octokit-fixture-org/release-assets/releases/tags/v1.0.0",
+      new Promise(() => {
+        abortController.abort();
+      })
+    );
+
+    return request("POST /repos/{owner}/{repo}/releases/tags/{tag}", {
+      owner: "octokit-fixture-org",
+      repo: "release-assets",
+      tag: "v1.0.0",
+      request: {
+        fetch: mock,
+        signal: abortController.signal,
+      },
+      headers: {
+        "content-type": "text/plain",
+      },
+      data: stringToArrayBuffer("Hello, world!\n"),
+      name: "test-upload.txt",
+      label: "test",
+    }).catch((error) => {
+      expect(error.name).toEqual("AbortError");
+    });
   });
 });
